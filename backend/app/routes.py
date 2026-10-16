@@ -1,26 +1,12 @@
+
+from decimal import Decimal, InvalidOperation
+
 from flask import Blueprint, jsonify, request
 
+from app import db
+from app.models import Product
+
 api = Blueprint("api", __name__)
-
-#Temporary in-memory product storage.
-products = [
-    {
-        "id": 1,
-        "name": "Headphones",
-        "price": 1500.0,
-        "stock": 25
-    },
-    {
-        "id": 2,
-        "name": "Keyboard",
-        "price": 900.0,
-        "stock": 15
-    }
-]
-
-next_product_id = 3
-
-
 
 @api.route("/api/health", methods=["GET"])
 def health_check():
@@ -28,6 +14,7 @@ def health_check():
         "status": "healthy",
         "application": "StockPilot API"
     }), 200
+
 
 @api.route("/api/info", methods=["GET"])
 def api_info():
@@ -37,11 +24,12 @@ def api_info():
         "version": "1.0.0"
     }), 200
 
+
 @api.route("/api/about", methods=["GET"])
 def about():
     return jsonify({
         "developer": "Ansh Parmar",
-        "project": "StockPilot",
+        "project": "StockPilot"
     }), 200
 
 
@@ -54,22 +42,29 @@ def validate_product_data(data, partial=False):
     if not data:
         return "Provide at least one product field."
 
-    if not set(data.keys()).issubset(allowed_fields):
+    if not set(data).issubset(allowed_fields):
         return "Only name, price, and stock fields are allowed."
 
     if not partial:
-        missing = allowed_fields - set(data.keys())
+        missing = allowed_fields - set(data)
         if missing:
             return f"Missing required fields: {', '.join(sorted(missing))}"
 
     if "name" in data:
-        if not isinstance(data["name"], str) or not data["name"].strip():
+        name = data["name"]
+        if not isinstance(name, str) or not name.strip():
             return "Name must be a non-empty string."
+        if len(name.strip()) > 120:
+            return "Name must be 120 characters or fewer."
 
     if "price" in data:
-        price = data["price"]
-        if isinstance(price, bool) or not isinstance(price, (int, float)):
-            return "Price must be a number."
+        try:
+            price = Decimal(str(data["price"]))
+        except (InvalidOperation, ValueError):
+            return "Price must be a valid number."
+
+        if isinstance(data["price"], bool) or not price.is_finite():
+            return "Price must be a finite number."
         if price < 0:
             return "Price cannot be negative."
 
@@ -82,46 +77,54 @@ def validate_product_data(data, partial=False):
 
     return None
 
+
 @api.route("/api/products", methods=["GET"])
 def get_products():
+    products = db.session.execute(
+        db.select(Product).order_by(Product.id)
+    ).scalars().all()
+
     return jsonify({
         "count": len(products),
-        "products": products
+        "products": [product.to_dict() for product in products]
     }), 200
 
 
 @api.route("/api/products/<int:product_id>", methods=["GET"])
 def get_product(product_id):
-    for product in products:
-        if product["id"] == product_id:
-            return jsonify({"product": product}), 200
+    product = db.session.get(Product, product_id)
 
-    return jsonify({"error": "Product not found."}), 404
+    if product is None:
+        return jsonify({"error": "Product not found."}), 404
+
+    return jsonify({"product": product.to_dict()}), 200
 
 
 @api.route("/api/products", methods=["POST"])
 def create_product():
-    global next_product_id
-
     data = request.get_json(silent=True)
     error = validate_product_data(data)
 
     if error:
         return jsonify({"error": error}), 400
 
-    product = {
-        "id": next_product_id,
-        "name": data["name"].strip(),
-        "price": float(data["price"]),
-        "stock": data["stock"]
-    }
+    product = Product(
+        name=data["name"].strip(),
+        price=Decimal(str(data["price"])),
+        stock=data["stock"]
+    )
 
-    products.append(product)
-    next_product_id += 1
+    try:
+        db.session.add(product)
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
+        api.logger.exception("Failed to create product")
+        return jsonify({"error": "Unable to create product."}), 500
 
     return jsonify({
         "message": "Product created successfully.",
-        "product": product
+        "product": product.to_dict()
     }), 201
 
 
@@ -133,33 +136,49 @@ def update_product(product_id):
     if error:
         return jsonify({"error": error}), 400
 
-    for product in products:
-        if product["id"] == product_id:
-            for field, value in data.items():
-                if field == "name":
-                    product[field] = value.strip()
-                elif field == "price":
-                    product[field] = float(value)
-                else:
-                    product[field] = value
+    product = db.session.get(Product, product_id)
 
-            return jsonify({
-                "message": "Product updated successfully.",
-                "product": product
-            }), 200
+    if product is None:
+        return jsonify({"error": "Product not found."}), 404
 
-    return jsonify({"error": "Product not found."}), 404
+    if "name" in data:
+        product.name = data["name"].strip()
+
+    if "price" in data:
+        product.price = Decimal(str(data["price"]))
+
+    if "stock" in data:
+        product.stock = data["stock"]
+
+    try:
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
+        api.logger.exception("Failed to update product")
+        return jsonify({"error": "Unable to update product."}), 500
+
+    return jsonify({
+        "message": "Product updated successfully.",
+        "product": product.to_dict()
+    }), 200
 
 
 @api.route("/api/products/<int:product_id>", methods=["DELETE"])
 def delete_product(product_id):
-    for index, product in enumerate(products):
-        if product["id"] == product_id:
-            deleted_product = products.pop(index)
+    product = db.session.get(Product, product_id)
 
-            return jsonify({
-                "message": "Product deleted successfully.",
-                "product": deleted_product
-            }), 200
+    if product is None:
+        return jsonify({"error": "Product not found."}), 404
 
-    return jsonify({"error": "Product not found."}), 404
+    try:
+        db.session.delete(product)
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
+        api.logger.exception("Failed to delete product")
+        return jsonify({"error": "Unable to delete product."}), 500
+
+    return jsonify({
+        "message": "Product deleted successfully.",
+        "product": product.to_dict()
+    }), 200
