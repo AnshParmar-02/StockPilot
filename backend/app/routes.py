@@ -78,14 +78,68 @@ def validate_product_data(data, partial=False):
     return None
 
 
+
 @api.route("/api/products", methods=["GET"])
 def get_products():
-    products = db.session.execute(
-        db.select(Product).order_by(Product.id)
-    ).scalars().all()
+    # Read query parameters from the URL.
+    search = request.args.get("search", "").strip()
+    page_text = request.args.get("page", "1")
+    per_page_text = request.args.get("per_page", "10")
+    low_stock_text = request.args.get("low_stock", "false").lower()
+
+    # Validate page number.
+    try:
+        page = int(page_text)
+        per_page = int(per_page_text)
+    except ValueError:
+        return jsonify({
+            "error": "page and per_page must be whole numbers."
+        }), 400
+
+    if page < 1:
+        return jsonify({"error": "page must be at least 1."}), 400
+
+    if per_page < 1 or per_page > 100:
+        return jsonify({
+            "error": "per_page must be between 1 and 100."
+        }), 400
+
+    if low_stock_text not in {"true", "false"}:
+        return jsonify({
+            "error": "low_stock must be true or false."
+        }), 400
+
+    # Start with a query for all products.
+    query = db.select(Product)
+
+    # Search product names, ignoring letter case.
+    if search:
+        query = query.where(
+            Product.name.ilike(f"%{search}%")
+        )
+
+    # For this initial version, low stock means 5 or fewer units.
+    if low_stock_text == "true":
+        query = query.where(Product.stock <= 5)
+
+    # Count the matching products before pagination.
+    count_query = db.select(db.func.count()).select_from(
+        query.order_by(None).subquery()
+    )
+    total = db.session.execute(count_query).scalar_one()
+
+    # Sort consistently, then return only the requested page.
+    query = query.order_by(Product.id)
+    query = query.offset((page - 1) * per_page).limit(per_page)
+
+    products = db.session.execute(query).scalars().all()
 
     return jsonify({
         "count": len(products),
+        "total": total,
+        "page": page,
+        "per_page": per_page,
+        "total_pages": (total + per_page - 1) // per_page,
         "products": [product.to_dict() for product in products]
     }), 200
 

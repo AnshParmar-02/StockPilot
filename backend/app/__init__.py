@@ -10,16 +10,22 @@ load_dotenv()
 db = SQLAlchemy()
 migrate = Migrate()
 
-def create_app():
+def create_app(test_config=None):
     app = Flask(__name__)
 
     database_url = os.getenv("DATABASE_URL")
 
-    if not database_url:
+    if not database_url and not test_config:
         raise RuntimeError("DATABASE URL is not configured.")
 
-    app.config["SQLALCHEMY_DATABASE_URI"] = database_url
-    app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
+    app.config.from_mapping(
+        SQLALCHEMY_DATABASE_URI=database_url,
+        SQLALCHEMY_TRACK_MODIFICATIONS=False,
+    )
+
+    # Tests can override the real database connection.
+    if test_config:
+        app.config.update(test_config)
 
     db.init_app(app)
     migrate.init_app(app, db)
